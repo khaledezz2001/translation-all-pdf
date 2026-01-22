@@ -5,9 +5,10 @@ import runpod
 
 from transformers import (
     AutoTokenizer,
-    AutoModelForSeq2SeqLM,
+    AutoModelForCausalLM,
     MarianTokenizer,
     MarianMTModel,
+    BitsAndBytesConfig,
 )
 
 # =====================================================
@@ -19,7 +20,7 @@ def log(msg):
 # =====================================================
 # Model paths
 # =====================================================
-SUMMARY_MODEL_PATH = "/models/hf/t5-summary"
+SUMMARY_MODEL_PATH = "/models/hf/qwen"
 TRANSLATE_MODEL_PATH = "/models/hf/marian-ru-en"
 
 summary_tokenizer = None
@@ -28,25 +29,34 @@ translate_tokenizer = None
 translate_model = None
 
 # =====================================================
-# Load SUMMARY model (FLAN-T5-XL)
+# Load SUMMARY model (Qwen 2.5 14B – 4bit)
 # =====================================================
 def load_summary_model():
     global summary_tokenizer, summary_model
     if summary_model is not None:
         return
 
-    log("Loading SUMMARY model (FLAN-T5-XL)")
+    log("Loading SUMMARY model (Qwen-2.5-14B-Instruct, 4-bit)")
+
+    quant_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4"
+    )
+
     summary_tokenizer = AutoTokenizer.from_pretrained(
         SUMMARY_MODEL_PATH,
         local_files_only=True,
-        use_fast=False
+        trust_remote_code=True
     )
 
-    summary_model = AutoModelForSeq2SeqLM.from_pretrained(
+    summary_model = AutoModelForCausalLM.from_pretrained(
         SUMMARY_MODEL_PATH,
-        torch_dtype=torch.float16,
+        quantization_config=quant_config,
         device_map="auto",
-        local_files_only=True
+        local_files_only=True,
+        trust_remote_code=True
     )
 
     summary_model.eval()
@@ -60,7 +70,8 @@ def load_translate_model():
     if translate_model is not None:
         return
 
-    log("Loading TRANSLATION model (Marian)")
+    log("Loading TRANSLATION model (Marian RU → EN)")
+
     translate_tokenizer = MarianTokenizer.from_pretrained(
         TRANSLATE_MODEL_PATH,
         local_files_only=True
@@ -73,7 +84,7 @@ def load_translate_model():
     ).to("cuda")
 
     translate_model.eval()
-    log("TRANSLATION model loaded on cuda")
+    log("TRANSLATION model loaded")
 
 # =====================================================
 # Helpers
@@ -81,35 +92,29 @@ def load_translate_model():
 def is_layout_line(line: str) -> bool:
     return bool(re.match(r"^[\-\._\s]{5,}$", line))
 
-def chunk_text(text, max_tokens=1800):
+def chunk_text(text, max_tokens=3000):
     tokens = summary_tokenizer.encode(text)
     for i in range(0, len(tokens), max_tokens):
         yield summary_tokenizer.decode(tokens[i:i + max_tokens])
 
 # =====================================================
-# Translation (structure-safe)
+# Translation (structure safe)
 # =====================================================
 def translate_text(text: str) -> str:
     lines = text.split("\n")
-    out_lines = []
+    out = []
 
     for line in lines:
         stripped = line.strip()
 
         if not stripped:
-            out_lines.append(line)
+            out.append(line)
             continue
-
-        if re.match(r"^[\u2022•\-\*\u00B7]+$", stripped):
-            out_lines.append(line)
-            continue
-
-        if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
-            out_lines.append(line)
-            continue
-
         if is_layout_line(line):
-            out_lines.append(line)
+            out.append(line)
+            continue
+        if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
+            out.append(line)
             continue
 
         inputs = translate_tokenizer(
@@ -126,106 +131,110 @@ def translate_text(text: str) -> str:
                 do_sample=False
             )
 
-        out_lines.append(
+        out.append(
             translate_tokenizer.decode(output[0], skip_special_tokens=True)
         )
 
-    return "\n".join(out_lines)
+    return "\n".join(out)
 
 # =====================================================
 # OCR cleanup
 # =====================================================
 def clean_ocr_noise(text: str) -> str:
-    cleaned_lines = []
+    cleaned = []
     seen = set()
 
-    for raw_line in text.split("\n"):
-        line = raw_line.strip()
+    for raw in text.split("\n"):
+        line = raw.strip()
         upper = line.upper()
 
         if not line:
             continue
-        if upper.startswith(("EXECUTED AS A DEED", "SIGNATURE OF WITNESS")):
-            continue
         if re.match(r"^[\-\._\s]{5,}$", line):
             continue
-        if len(re.findall(r"[A-Za-zА-Яа-я]", line)) < 5:
+        if len(re.findall(r"[A-Za-zА-Яa-я]", line)) < 5:
             continue
         if upper in seen:
             continue
 
         seen.add(upper)
-        cleaned_lines.append(line)
+        cleaned.append(line)
 
-    return "\n".join(cleaned_lines)
+    return "\n".join(cleaned)
 
 # =====================================================
-# Summarize ALL pages (chunked)
+# Summarize / Rewrite (ENGLISH ONLY, chunked)
 # =====================================================
 def summarize_all_pages(pages):
     full_text = "\n\n".join(
         cleaned
         for p in pages
         if (cleaned := clean_ocr_noise(p["text"]))
-        and len(re.findall(r"[A-Za-zА-Яа-я]", cleaned)) > 20
+        and len(re.findall(r"[A-Za-z]", cleaned)) > 20
     )
 
     if not full_text.strip():
         return ""
 
-    prompt_prefix = (
-        "Rewrite the contract below in English.\n"
-        "IMPORTANT:\n"
-        "- This is NOT a summary.\n"
-        "- Restate ALL factual information in full.\n"
-        "- Do NOT omit names, dates, addresses, amounts, or penalties.\n"
-        "- Expand into formal legal sentences.\n"
-        "- Convert tables into sentences.\n\n"
+    system_prompt = (
+        "You are a professional legal assistant.\n"
+        "Rewrite the contract in English.\n"
+        "Rules:\n"
+        "- This is NOT a summary\n"
+        "- Restate ALL factual information\n"
+        "- Do NOT omit names, dates, addresses, amounts, penalties\n"
+        "- Expand into formal legal language\n"
+        "- Convert tables into sentences\n\n"
     )
 
     outputs = []
 
     for chunk in chunk_text(full_text):
-        prompt = prompt_prefix + chunk
+        prompt = (
+            "<|system|>\n" + system_prompt +
+            "<|user|>\n" + chunk +
+            "\n<|assistant|>\n"
+        )
 
         inputs = summary_tokenizer(
             prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=2048
+            return_tensors="pt"
         ).to(summary_model.device)
 
         with torch.no_grad():
             output = summary_model.generate(
                 **inputs,
-                max_new_tokens=512,
+                max_new_tokens=900,
                 do_sample=False
             )
 
-        outputs.append(
-            summary_tokenizer.decode(output[0], skip_special_tokens=True)
+        text = summary_tokenizer.decode(
+            output[0], skip_special_tokens=True
         )
+
+        outputs.append(text)
 
     return "\n\n".join(outputs)
 
 # =====================================================
-# RunPod handler
+# RunPod handler (CORRECT ORDER)
 # =====================================================
 def handler(event):
     log("Handler started")
 
     pages = event["input"]["pages"]
 
-    load_summary_model()
     load_translate_model()
+    load_summary_model()
 
-    log("Creating summary")
-    raw_summary = summarize_all_pages(pages)
-    summary = translate_text(raw_summary) if raw_summary else ""
-
-    log("Translating pages")
+    # 1️⃣ Translate FIRST
+    log("Translating pages to English")
     for p in pages:
         p["text"] = translate_text(p["text"])
+
+    # 2️⃣ Summarize / rewrite English text
+    log("Creating summary from English text")
+    summary = summarize_all_pages(pages)
 
     log("Handler finished")
 
