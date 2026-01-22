@@ -28,14 +28,14 @@ translate_tokenizer = None
 translate_model = None
 
 # =====================================================
-# Load SUMMARY model (T5)
+# Load SUMMARY model (FLAN-T5-XL)
 # =====================================================
 def load_summary_model():
     global summary_tokenizer, summary_model
     if summary_model is not None:
         return
 
-    log("Loading SUMMARY model (T5)")
+    log("Loading SUMMARY model (FLAN-T5-XL)")
     summary_tokenizer = AutoTokenizer.from_pretrained(
         SUMMARY_MODEL_PATH,
         local_files_only=True,
@@ -53,7 +53,7 @@ def load_summary_model():
     log("SUMMARY model loaded")
 
 # =====================================================
-# Load TRANSLATION model (Marian)
+# Load TRANSLATION model (Marian RU → EN)
 # =====================================================
 def load_translate_model():
     global translate_tokenizer, translate_model
@@ -76,13 +76,18 @@ def load_translate_model():
     log("TRANSLATION model loaded on cuda")
 
 # =====================================================
-# Detect pure separator lines (---, ___)
+# Helpers
 # =====================================================
 def is_layout_line(line: str) -> bool:
     return bool(re.match(r"^[\-\._\s]{5,}$", line))
 
+def chunk_text(text, max_tokens=1800):
+    tokens = summary_tokenizer.encode(text)
+    for i in range(0, len(tokens), max_tokens):
+        yield summary_tokenizer.decode(tokens[i:i + max_tokens])
+
 # =====================================================
-# Translate text (TABLES INCLUDED, STRUCTURE SAFE)
+# Translation (structure-safe)
 # =====================================================
 def translate_text(text: str) -> str:
     lines = text.split("\n")
@@ -91,81 +96,22 @@ def translate_text(text: str) -> str:
     for line in lines:
         stripped = line.strip()
 
-        # =================================================
-        # 🔒 HARD GUARDS — DO NOT TRANSLATE MEANINGLESS INPUT
-        # =================================================
-
-        # Empty line
         if not stripped:
             out_lines.append(line)
             continue
 
-        # Bullet / symbol-only line (•, -, *, etc.)
         if re.match(r"^[\u2022•\-\*\u00B7]+$", stripped):
             out_lines.append(line)
             continue
 
-        # Very low linguistic content → skip
         if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
             out_lines.append(line)
             continue
 
-        # Full separator row (tables)
-        if re.match(r"^\|\s*[-\s_\.]+\|\s*[-\s_\.]+\|\s*$", line):
-            out_lines.append(line)
-            continue
-
-        # Pure separator (no pipes)
         if is_layout_line(line):
             out_lines.append(line)
             continue
 
-        # =================================================
-        # TABLE ROW
-        # =================================================
-        if "|" in line:
-            cells = line.split("|")
-            new_cells = []
-
-            for cell in cells:
-                cell_text = cell.strip()
-
-                # Skip empty / separator cells
-                if not cell_text or re.match(r"^[-\s_\.]+$", cell_text):
-                    new_cells.append(cell)
-                    continue
-
-                # Skip non-linguistic cells
-                if len(re.findall(r"[A-Za-zА-Яа-я]", cell_text)) < 2:
-                    new_cells.append(cell)
-                    continue
-
-                inputs = translate_tokenizer(
-                    cell_text,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=128
-                ).to(translate_model.device)
-
-                with torch.no_grad():
-                    output = translate_model.generate(
-                        **inputs,
-                        max_new_tokens=128,
-                        do_sample=False
-                    )
-
-                translated = translate_tokenizer.decode(
-                    output[0], skip_special_tokens=True
-                )
-
-                new_cells.append(f" {translated} ")
-
-            out_lines.append("|".join(new_cells))
-            continue
-
-        # =================================================
-        # NORMAL TEXT LINE
-        # =================================================
         inputs = translate_tokenizer(
             line,
             return_tensors="pt",
@@ -187,111 +133,80 @@ def translate_text(text: str) -> str:
     return "\n".join(out_lines)
 
 # =====================================================
-# Summarize ALL pages together
+# OCR cleanup
 # =====================================================
 def clean_ocr_noise(text: str) -> str:
-   
     cleaned_lines = []
     seen = set()
 
     for raw_line in text.split("\n"):
         line = raw_line.strip()
-
-        # -------------------------------
-        # Пустые строки
-        # -------------------------------
-        if not line:
-            continue
-
         upper = line.upper()
 
-        # -------------------------------
-        # Подписи, свидетели, boilerplate
-        # -------------------------------
-        if upper.startswith("EXECUTED AS A DEED"):
+        if not line:
             continue
-        if upper.startswith("SIGNATURE OF WITNESS"):
+        if upper.startswith(("EXECUTED AS A DEED", "SIGNATURE OF WITNESS")):
             continue
-        if upper.startswith("IN THE PRESIDENCY OF"):
-            continue
-        if re.match(r"^NAME:\s*$", upper):
-            continue
-        if re.match(r"^ADDRESS:\s*$", upper):
-            continue
-
-        # -------------------------------
-        # OCR / редакторский мусор
-        # -------------------------------
-        if "SYNC, CORRECTED BY" in upper:
-            continue
-        if upper.startswith("==") and upper.endswith("=="):
-            continue
-
-        # -------------------------------
-        # Плейсхолдеры
-        # -------------------------------
-        if line in {"[-]", "[ ]", "[__]", "_____"}:
-            continue
-
-        # -------------------------------
-        # Линии разметки (----, ____ и т.п.)
-        # -------------------------------
         if re.match(r"^[\-\._\s]{5,}$", line):
             continue
-
-        # -------------------------------
-        # Очень низкая языковая нагрузка
-        # (оставляем заголовки, убираем мусор)
-        # -------------------------------
         if len(re.findall(r"[A-Za-zА-Яа-я]", line)) < 5:
             continue
-
-        # -------------------------------
-        # Удаление дубликатов строк
-        # -------------------------------
-        key = upper
-        if key in seen:
+        if upper in seen:
             continue
-        seen.add(key)
 
+        seen.add(upper)
         cleaned_lines.append(line)
 
     return "\n".join(cleaned_lines)
 
-
+# =====================================================
+# Summarize ALL pages (chunked)
+# =====================================================
 def summarize_all_pages(pages):
     full_text = "\n\n".join(
         cleaned
         for p in pages
         if (cleaned := clean_ocr_noise(p["text"]))
         and len(re.findall(r"[A-Za-zА-Яа-я]", cleaned)) > 20
-     )
-
+    )
 
     if not full_text.strip():
         return ""
 
-    prompt = (
-    "Rewrite the contract below in English. IMPORTANT: - This is NOT a summary. - You MUST restate ALL factual information in full. - Output MUST be at least 500 words. - Expand each section into detailed legal sentences.- Do NOT omit names, dates, addresses, amounts, percentages, or penalties.- If information appears in tables, convert it to full sentences.Write each required section as a separate heading."
-    + full_text
-     )
+    prompt_prefix = (
+        "Rewrite the contract below in English.\n"
+        "IMPORTANT:\n"
+        "- This is NOT a summary.\n"
+        "- Restate ALL factual information in full.\n"
+        "- Do NOT omit names, dates, addresses, amounts, or penalties.\n"
+        "- Expand into formal legal sentences.\n"
+        "- Convert tables into sentences.\n\n"
+    )
 
+    outputs = []
 
-    inputs = summary_tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=2048
-    ).to(summary_model.device)
+    for chunk in chunk_text(full_text):
+        prompt = prompt_prefix + chunk
 
-    with torch.no_grad():
-        output = summary_model.generate(
-            **inputs,
-            max_new_tokens=512,
-            do_sample=False
+        inputs = summary_tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=2048
+        ).to(summary_model.device)
+
+        with torch.no_grad():
+            output = summary_model.generate(
+                **inputs,
+                max_new_tokens=512,
+                do_sample=False
+            )
+
+        outputs.append(
+            summary_tokenizer.decode(output[0], skip_special_tokens=True)
         )
 
-    return summary_tokenizer.decode(output[0], skip_special_tokens=True)
+    return "\n\n".join(outputs)
 
 # =====================================================
 # RunPod handler
@@ -304,12 +219,10 @@ def handler(event):
     load_summary_model()
     load_translate_model()
 
-    # ---- Summary ----
     log("Creating summary")
     raw_summary = summarize_all_pages(pages)
     summary = translate_text(raw_summary) if raw_summary else ""
 
-    # ---- Translation ----
     log("Translating pages")
     for p in pages:
         p["text"] = translate_text(p["text"])
