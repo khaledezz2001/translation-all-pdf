@@ -8,7 +8,6 @@ from transformers import (
     AutoModelForCausalLM,
     MarianTokenizer,
     MarianMTModel,
-    BitsAndBytesConfig,
 )
 
 # =====================================================
@@ -29,21 +28,14 @@ translate_tokenizer = None
 translate_model = None
 
 # =====================================================
-# Load SUMMARY model (Qwen 2.5 14B – 4bit)
+# Load SUMMARY model (Qwen 2.5 7B – FP16)
 # =====================================================
 def load_summary_model():
     global summary_tokenizer, summary_model
     if summary_model is not None:
         return
 
-    log("Loading SUMMARY model (Qwen-2.5-14B-Instruct, 4-bit)")
-
-    quant_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float16,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4"
-    )
+    log("Loading SUMMARY model (Qwen-2.5-7B-Instruct, FP16)")
 
     summary_tokenizer = AutoTokenizer.from_pretrained(
         SUMMARY_MODEL_PATH,
@@ -53,7 +45,7 @@ def load_summary_model():
 
     summary_model = AutoModelForCausalLM.from_pretrained(
         SUMMARY_MODEL_PATH,
-        quantization_config=quant_config,
+        torch_dtype=torch.float16,
         device_map="auto",
         local_files_only=True,
         trust_remote_code=True
@@ -92,13 +84,13 @@ def load_translate_model():
 def is_layout_line(line: str) -> bool:
     return bool(re.match(r"^[\-\._\s]{5,}$", line))
 
-def chunk_text(text, max_tokens=3000):
+def chunk_text(text, max_tokens=2800):
     tokens = summary_tokenizer.encode(text)
     for i in range(0, len(tokens), max_tokens):
         yield summary_tokenizer.decode(tokens[i:i + max_tokens])
 
 # =====================================================
-# Translation (structure safe)
+# Translation (structure-safe)
 # =====================================================
 def translate_text(text: str) -> str:
     lines = text.split("\n")
@@ -152,7 +144,7 @@ def clean_ocr_noise(text: str) -> str:
             continue
         if re.match(r"^[\-\._\s]{5,}$", line):
             continue
-        if len(re.findall(r"[A-Za-zА-Яa-я]", line)) < 5:
+        if len(re.findall(r"[A-Za-z]", line)) < 5:
             continue
         if upper in seen:
             continue
@@ -163,7 +155,7 @@ def clean_ocr_noise(text: str) -> str:
     return "\n".join(cleaned)
 
 # =====================================================
-# Summarize / Rewrite (ENGLISH ONLY, chunked)
+# Summarize / Rewrite (English only, chunked)
 # =====================================================
 def summarize_all_pages(pages):
     full_text = "\n\n".join(
@@ -208,11 +200,9 @@ def summarize_all_pages(pages):
                 do_sample=False
             )
 
-        text = summary_tokenizer.decode(
-            output[0], skip_special_tokens=True
+        outputs.append(
+            summary_tokenizer.decode(output[0], skip_special_tokens=True)
         )
-
-        outputs.append(text)
 
     return "\n\n".join(outputs)
 
@@ -232,7 +222,7 @@ def handler(event):
     for p in pages:
         p["text"] = translate_text(p["text"])
 
-    # 2️⃣ Summarize / rewrite English text
+    # 2️⃣ Summarize / rewrite
     log("Creating summary from English text")
     summary = summarize_all_pages(pages)
 
