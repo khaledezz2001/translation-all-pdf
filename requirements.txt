@@ -3,6 +3,7 @@ transformers==4.39.3
 huggingface_hub==0.20.3
 accelerate==0.26.1
 bitsandbytes==0.43.1
+triton==2.1.0
 sentencepiece==0.1.99
 runpod==1.6.2
 pillow==10.2.0
