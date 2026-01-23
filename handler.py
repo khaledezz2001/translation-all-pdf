@@ -55,7 +55,7 @@ def load_summary_model():
     log("SUMMARY model loaded")
 
 # =====================================================
-# Load TRANSLATION model (Marian RU → EN)
+# Load TRANSLATION model  (Marian RU → EN)
 # =====================================================
 def load_translate_model():
     global translate_tokenizer, translate_model
@@ -279,3 +279,4 @@ def handler(event):
 # Start RunPod serverless
 # =====================================================
 runpod.serverless.start({"handler": handler})
+
