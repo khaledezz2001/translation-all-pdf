@@ -11,7 +11,7 @@ from transformers import (
 )
 
 # =====================================================
-# Logging helper
+# Logging helper  
 # =====================================================
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -292,3 +292,4 @@ def handler(event):
 # Start RunPod serverless
 # =====================================================
 runpod.serverless.start({"handler": handler})
+
