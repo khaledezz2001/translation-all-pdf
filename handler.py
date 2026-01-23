@@ -90,25 +90,66 @@ def chunk_text(text, max_tokens=2800):
         yield summary_tokenizer.decode(tokens[i:i + max_tokens])
 
 # =====================================================
-# Translation (structure-safe)
+# STRUCTURE-SAFE TRANSLATION
 # =====================================================
 def translate_text(text: str) -> str:
     lines = text.split("\n")
-    out = []
+    out_lines = []
 
     for line in lines:
         stripped = line.strip()
 
+        # Empty line
         if not stripped:
-            out.append(line)
-            continue
-        if is_layout_line(line):
-            out.append(line)
-            continue
-        if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
-            out.append(line)
+            out_lines.append(line)
             continue
 
+        # Table separator row
+        if re.match(r"^\|\s*[-\s_]+\|", line):
+            out_lines.append(line)
+            continue
+
+        # Table row → translate cells only
+        if "|" in line:
+            cells = line.split("|")
+            new_cells = []
+
+            for cell in cells:
+                cell_text = cell.strip()
+
+                if not cell_text or len(re.findall(r"[A-Za-zА-Яа-я]", cell_text)) < 2:
+                    new_cells.append(cell)
+                    continue
+
+                inputs = translate_tokenizer(
+                    cell_text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=128
+                ).to(translate_model.device)
+
+                with torch.no_grad():
+                    output = translate_model.generate(
+                        **inputs,
+                        max_new_tokens=128,
+                        do_sample=False
+                    )
+
+                translated = translate_tokenizer.decode(
+                    output[0], skip_special_tokens=True
+                )
+
+                new_cells.append(f" {translated} ")
+
+            out_lines.append("|".join(new_cells))
+            continue
+
+        # Non-linguistic line
+        if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
+            out_lines.append(line)
+            continue
+
+        # Normal text line
         inputs = translate_tokenizer(
             line,
             return_tensors="pt",
@@ -123,11 +164,11 @@ def translate_text(text: str) -> str:
                 do_sample=False
             )
 
-        out.append(
+        out_lines.append(
             translate_tokenizer.decode(output[0], skip_special_tokens=True)
         )
 
-    return "\n".join(out)
+    return "\n".join(out_lines)
 
 # =====================================================
 # OCR cleanup
@@ -142,7 +183,7 @@ def clean_ocr_noise(text: str) -> str:
 
         if not line:
             continue
-        if re.match(r"^[\-\._\s]{5,}$", line):
+        if is_layout_line(line):
             continue
         if len(re.findall(r"[A-Za-z]", line)) < 5:
             continue
@@ -155,7 +196,7 @@ def clean_ocr_noise(text: str) -> str:
     return "\n".join(cleaned)
 
 # =====================================================
-# Summarize / Rewrite (English only, chunked)
+# SUMMARY (~100 WORDS)
 # =====================================================
 def summarize_all_pages(pages):
     full_text = "\n\n".join(
@@ -170,13 +211,14 @@ def summarize_all_pages(pages):
 
     system_prompt = (
         "You are a professional legal assistant.\n"
-        "Rewrite the contract in English.\n"
+        "Summarize the contract in clear English.\n"
         "Rules:\n"
-        "- This is NOT a summary\n"
-        "- Restate ALL factual information\n"
-        "- Do NOT omit names, dates, addresses, amounts, penalties\n"
-        "- Expand into formal legal language\n"
-        "- Convert tables into sentences\n\n"
+        "- This MUST be a concise summary, not a rewrite\n"
+        "- Length MUST be about 100 words (not more than 120)\n"
+        "- Include the parties, date, location, and purpose\n"
+        "- Do NOT invent clauses or sections\n"
+        "- Ignore table formatting and layout symbols\n"
+        "- Do NOT include signatures or boilerplate\n\n"
     )
 
     outputs = []
@@ -196,7 +238,7 @@ def summarize_all_pages(pages):
         with torch.no_grad():
             output = summary_model.generate(
                 **inputs,
-                max_new_tokens=900,
+                max_new_tokens=180,
                 do_sample=False
             )
 
@@ -207,7 +249,7 @@ def summarize_all_pages(pages):
     return "\n\n".join(outputs)
 
 # =====================================================
-# RunPod handler (CORRECT ORDER)
+# RunPod handler
 # =====================================================
 def handler(event):
     log("Handler started")
@@ -217,13 +259,13 @@ def handler(event):
     load_translate_model()
     load_summary_model()
 
-    # 1️⃣ Translate FIRST
+    # 1️⃣ Translate first (structure preserved)
     log("Translating pages to English")
     for p in pages:
         p["text"] = translate_text(p["text"])
 
-    # 2️⃣ Summarize / rewrite
-    log("Creating summary from English text")
+    # 2️⃣ Summarize (~100 words)
+    log("Creating summary")
     summary = summarize_all_pages(pages)
 
     log("Handler finished")
