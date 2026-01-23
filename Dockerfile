@@ -11,11 +11,11 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
-# Qwen 2.5 14B Instruct
+# Qwen 2.5 7B Instruct (FP16 – stable)
 RUN python3 - <<EOF
 from huggingface_hub import snapshot_download
 snapshot_download(
-    repo_id="Qwen/Qwen2.5-14B-Instruct",
+    repo_id="Qwen/Qwen2.5-7B-Instruct",
     local_dir="/models/hf/qwen",
     local_dir_use_symlinks=False
 )
