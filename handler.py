@@ -55,7 +55,7 @@ def load_summary_model():
     log("SUMMARY model loaded")
 
 # =====================================================
-# Load TRANSLATION model  (Marian RU → EN)
+# Load TRANSLATION model (Marian RU → EN)
 # =====================================================
 def load_translate_model():
     global translate_tokenizer, translate_model
@@ -79,18 +79,13 @@ def load_translate_model():
     log("TRANSLATION model loaded")
 
 # =====================================================
-# Helpers
+# Detect pure separator lines
 # =====================================================
 def is_layout_line(line: str) -> bool:
     return bool(re.match(r"^[\-\._\s]{5,}$", line))
 
-def chunk_text(text, max_tokens=2800):
-    tokens = summary_tokenizer.encode(text)
-    for i in range(0, len(tokens), max_tokens):
-        yield summary_tokenizer.decode(tokens[i:i + max_tokens])
-
 # =====================================================
-# STRUCTURE-SAFE TRANSLATION
+# TRANSLATION (OLD, PROVEN, STRUCTURE-SAFE VERSION)
 # =====================================================
 def translate_text(text: str) -> str:
     lines = text.split("\n")
@@ -104,12 +99,29 @@ def translate_text(text: str) -> str:
             out_lines.append(line)
             continue
 
-        # Table separator row
-        if re.match(r"^\|\s*[-\s_]+\|", line):
+        # Symbol-only lines
+        if re.match(r"^[\u2022•\-\*\u00B7]+$", stripped):
             out_lines.append(line)
             continue
 
-        # Table row → translate cells only
+        # Very low linguistic content
+        if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
+            out_lines.append(line)
+            continue
+
+        # Table separator row
+        if re.match(r"^\|\s*[-\s_\.]+\|\s*[-\s_\.]+\|\s*$", line):
+            out_lines.append(line)
+            continue
+
+        # Pure layout separator
+        if is_layout_line(line):
+            out_lines.append(line)
+            continue
+
+        # -------------------------
+        # TABLE ROW (CELL-BY-CELL)
+        # -------------------------
         if "|" in line:
             cells = line.split("|")
             new_cells = []
@@ -117,7 +129,11 @@ def translate_text(text: str) -> str:
             for cell in cells:
                 cell_text = cell.strip()
 
-                if not cell_text or len(re.findall(r"[A-Za-zА-Яа-я]", cell_text)) < 2:
+                if not cell_text or re.match(r"^[-\s_\.]+$", cell_text):
+                    new_cells.append(cell)
+                    continue
+
+                if len(re.findall(r"[A-Za-zА-Яа-я]", cell_text)) < 2:
                     new_cells.append(cell)
                     continue
 
@@ -144,12 +160,9 @@ def translate_text(text: str) -> str:
             out_lines.append("|".join(new_cells))
             continue
 
-        # Non-linguistic line
-        if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
-            out_lines.append(line)
-            continue
-
-        # Normal text line
+        # -------------------------
+        # NORMAL TEXT LINE
+        # -------------------------
         inputs = translate_tokenizer(
             line,
             return_tensors="pt",
@@ -171,7 +184,7 @@ def translate_text(text: str) -> str:
     return "\n".join(out_lines)
 
 # =====================================================
-# OCR cleanup
+# OCR cleanup (for summary only)
 # =====================================================
 def clean_ocr_noise(text: str) -> str:
     cleaned = []
@@ -221,32 +234,32 @@ def summarize_all_pages(pages):
         "- Do NOT include signatures or boilerplate\n\n"
     )
 
-    outputs = []
+    prompt = (
+        "<|system|>\n" + system_prompt +
+        "<|user|>\n" + full_text +
+        "\n<|assistant|>\n"
+    )
 
-    for chunk in chunk_text(full_text):
-        prompt = (
-            "<|system|>\n" + system_prompt +
-            "<|user|>\n" + chunk +
-            "\n<|assistant|>\n"
+    inputs = summary_tokenizer(
+        prompt,
+        return_tensors="pt"
+    ).to(summary_model.device)
+
+    with torch.no_grad():
+        output = summary_model.generate(
+            **inputs,
+            max_new_tokens=180,
+            do_sample=False
         )
 
-        inputs = summary_tokenizer(
-            prompt,
-            return_tensors="pt"
-        ).to(summary_model.device)
+    decoded = summary_tokenizer.decode(
+        output[0], skip_special_tokens=True
+    )
 
-        with torch.no_grad():
-            output = summary_model.generate(
-                **inputs,
-                max_new_tokens=180,
-                do_sample=False
-            )
+    # Remove any chat artifacts
+    decoded = re.sub(r"<\|.*?\|>", "", decoded).strip()
 
-        outputs.append(
-            summary_tokenizer.decode(output[0], skip_special_tokens=True)
-        )
-
-    return "\n\n".join(outputs)
+    return decoded
 
 # =====================================================
 # RunPod handler
@@ -259,8 +272,8 @@ def handler(event):
     load_translate_model()
     load_summary_model()
 
-    # 1️⃣ Translate first (structure preserved)
-    log("Translating pages to English")
+    # 1️⃣ Translate pages (STRUCTURE SAFE)
+    log("Translating pages")
     for p in pages:
         p["text"] = translate_text(p["text"])
 
@@ -279,4 +292,3 @@ def handler(event):
 # Start RunPod serverless
 # =====================================================
 runpod.serverless.start({"handler": handler})
-
