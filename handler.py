@@ -11,7 +11,7 @@ from transformers import (
 )
 
 # =====================================================
-# Logging helpe r
+# Logging helper
 # =====================================================
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -114,7 +114,7 @@ def translate_text(text: str) -> str:
             out_lines.append(line)
             continue
 
-        # -------- TABLE ROW (CELL-BY-CELL) --------
+        # ---------- TABLE ROW ----------
         if "|" in line:
             cells = line.split("|")
             new_cells = []
@@ -153,7 +153,7 @@ def translate_text(text: str) -> str:
             out_lines.append("|".join(new_cells))
             continue
 
-        # -------- NORMAL TEXT LINE --------
+        # ---------- NORMAL LINE ----------
         inputs = translate_tokenizer(
             line,
             return_tensors="pt",
@@ -175,7 +175,7 @@ def translate_text(text: str) -> str:
     return "\n".join(out_lines)
 
 # =====================================================
-# OCR cleanup (for summary only)
+# OCR cleanup (used only for summary)
 # =====================================================
 def clean_ocr_noise(text: str) -> str:
     cleaned = []
@@ -200,9 +200,18 @@ def clean_ocr_noise(text: str) -> str:
     return "\n".join(cleaned)
 
 # =====================================================
-# SUMMARY (~100 WORDS, CLEAN OUTPUT ONLY)
+# Word limiter
 # =====================================================
-def summarize_all_pages(pages):
+def limit_words(text: str, max_words: int) -> str:
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return " ".join(words[:max_words])
+
+# =====================================================
+# SUMMARY (N WORDS, CLEAN OUTPUT ONLY)
+# =====================================================
+def summarize_all_pages(pages, max_words: int):
     full_text = "\n\n".join(
         cleaned
         for p in pages
@@ -215,14 +224,12 @@ def summarize_all_pages(pages):
 
     system_prompt = (
         "You are a professional legal assistant.\n"
-        "Summarize the contract in clear English.\n"
+        "Summarize the document in clear English.\n"
         "Rules:\n"
         "- This MUST be a concise summary, not a rewrite\n"
-        "- Length MUST be about 100 words (not more than 120)\n"
-        "- Include the parties, date, location, and purpose\n"
-        "- Do NOT invent clauses or sections\n"
-        "- Ignore table formatting and layout symbols\n"
-        "- Do NOT include signatures or boilerplate\n\n"
+        "- Do NOT invent facts or clauses\n"
+        "- Include only key information\n"
+        "- Ignore layout, tables, and formatting\n\n"
     )
 
     prompt = (
@@ -239,7 +246,8 @@ def summarize_all_pages(pages):
     with torch.no_grad():
         output = summary_model.generate(
             **inputs,
-            max_new_tokens=180,
+            max_new_tokens=max_words * 2,
+            min_new_tokens=max(30, max_words // 2),
             do_sample=False
         )
 
@@ -247,13 +255,13 @@ def summarize_all_pages(pages):
         output[0], skip_special_tokens=True
     )
 
-    # ✅ Extract ONLY assistant answer
+    # Extract assistant response only
     if "<|assistant|>" in decoded:
         decoded = decoded.split("<|assistant|>")[-1]
 
     decoded = re.sub(r"<\|.*?\|>", "", decoded).strip()
 
-    return decoded
+    return limit_words(decoded, max_words)
 
 # =====================================================
 # RunPod handler
@@ -261,19 +269,23 @@ def summarize_all_pages(pages):
 def handler(event):
     log("Handler started")
 
-    pages = event["input"]["pages"]
+    input_data = event["input"]
+    pages = input_data["pages"]
+
+    # Read desired word count (default = 100)
+    max_words = int(input_data.get("n_words", 100))
 
     load_translate_model()
     load_summary_model()
 
-    # 1️⃣ Translate pages (structure preserved)
+    # 1️⃣ Translate pages
     log("Translating pages")
     for p in pages:
         p["text"] = translate_text(p["text"])
 
-    # 2️⃣ Summarize (~100 words)
-    log("Creating summary")
-    summary = summarize_all_pages(pages)
+    # 2️⃣ Summarize
+    log(f"Creating summary ({max_words} words)")
+    summary = summarize_all_pages(pages, max_words)
 
     log("Handler finished")
 
@@ -286,4 +298,3 @@ def handler(event):
 # Start RunPod serverless
 # =====================================================
 runpod.serverless.start({"handler": handler})
-
