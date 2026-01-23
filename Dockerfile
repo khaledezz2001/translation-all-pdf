@@ -11,12 +11,12 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir -r /requirements.txt
 
-# FLAN-T5-XL (32GB VRAM safe)
+# Qwen 2.5 14B Instruct
 RUN python3 - <<EOF
 from huggingface_hub import snapshot_download
 snapshot_download(
-    repo_id="google/flan-t5-xl",
-    local_dir="/models/hf/t5-summary",
+    repo_id="Qwen/Qwen2.5-14B-Instruct",
+    local_dir="/models/hf/qwen",
     local_dir_use_symlinks=False
 )
 EOF
