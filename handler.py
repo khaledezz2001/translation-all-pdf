@@ -11,7 +11,7 @@ from transformers import (
 )
 
 # =====================================================
-# Logging helper  
+# Logging helper
 # =====================================================
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -79,7 +79,7 @@ def load_translate_model():
     log("TRANSLATION model loaded")
 
 # =====================================================
-# Detect pure separator lines
+# Detect layout separators
 # =====================================================
 def is_layout_line(line: str) -> bool:
     return bool(re.match(r"^[\-\._\s]{5,}$", line))
@@ -94,34 +94,27 @@ def translate_text(text: str) -> str:
     for line in lines:
         stripped = line.strip()
 
-        # Empty line
         if not stripped:
             out_lines.append(line)
             continue
 
-        # Symbol-only lines
         if re.match(r"^[\u2022•\-\*\u00B7]+$", stripped):
             out_lines.append(line)
             continue
 
-        # Very low linguistic content
         if len(re.findall(r"[A-Za-zА-Яа-я]", stripped)) < 2:
             out_lines.append(line)
             continue
 
-        # Table separator row
         if re.match(r"^\|\s*[-\s_\.]+\|\s*[-\s_\.]+\|\s*$", line):
             out_lines.append(line)
             continue
 
-        # Pure layout separator
         if is_layout_line(line):
             out_lines.append(line)
             continue
 
-        # -------------------------
-        # TABLE ROW (CELL-BY-CELL)
-        # -------------------------
+        # -------- TABLE ROW (CELL-BY-CELL) --------
         if "|" in line:
             cells = line.split("|")
             new_cells = []
@@ -160,9 +153,7 @@ def translate_text(text: str) -> str:
             out_lines.append("|".join(new_cells))
             continue
 
-        # -------------------------
-        # NORMAL TEXT LINE
-        # -------------------------
+        # -------- NORMAL TEXT LINE --------
         inputs = translate_tokenizer(
             line,
             return_tensors="pt",
@@ -209,7 +200,7 @@ def clean_ocr_noise(text: str) -> str:
     return "\n".join(cleaned)
 
 # =====================================================
-# SUMMARY (~100 WORDS)
+# SUMMARY (~100 WORDS, CLEAN OUTPUT ONLY)
 # =====================================================
 def summarize_all_pages(pages):
     full_text = "\n\n".join(
@@ -256,7 +247,10 @@ def summarize_all_pages(pages):
         output[0], skip_special_tokens=True
     )
 
-    # Remove any chat artifacts
+    # ✅ Extract ONLY assistant answer
+    if "<|assistant|>" in decoded:
+        decoded = decoded.split("<|assistant|>")[-1]
+
     decoded = re.sub(r"<\|.*?\|>", "", decoded).strip()
 
     return decoded
@@ -272,7 +266,7 @@ def handler(event):
     load_translate_model()
     load_summary_model()
 
-    # 1️⃣ Translate pages (STRUCTURE SAFE)
+    # 1️⃣ Translate pages (structure preserved)
     log("Translating pages")
     for p in pages:
         p["text"] = translate_text(p["text"])
@@ -292,4 +286,3 @@ def handler(event):
 # Start RunPod serverless
 # =====================================================
 runpod.serverless.start({"handler": handler})
-
