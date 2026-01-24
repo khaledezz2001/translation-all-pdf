@@ -28,6 +28,22 @@ translate_tokenizer = None
 translate_model = None
 
 # =====================================================
+# Default system prompt (used if not provided in request)
+# =====================================================
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a professional legal assistant.\n"
+    "Summarize the ENTIRE document in clear English.\n"
+    "IMPORTANT RULES:\n"
+    "- The document may span multiple pages and sections\n"
+    "- You MUST consider ALL sections, not only the beginning\n"
+    "- Compress information evenly across the whole document\n"
+    "- Mention the parties, subject matter, price, term, payments, penalties, and dispute resolution if present\n"
+    "- This MUST be a concise summary, not a rewrite\n"
+    "- Do NOT invent facts or clauses\n"
+    "- Ignore layout, tables, and formatting\n\n"
+)
+
+# =====================================================
 # Load SUMMARY model (Qwen 2.5 7B – FP16)
 # =====================================================
 def load_summary_model():
@@ -126,7 +142,7 @@ def translate_text(text: str) -> str:
                     new_cells.append(cell)
                     continue
 
-                if len(re.findall(r"[A-Za-zА-Яа-я]", cell_text)) < 2:
+                if len(re.findall(r"[A-Za-zА-Яa-я]", cell_text)) < 2:
                     new_cells.append(cell)
                     continue
 
@@ -209,9 +225,9 @@ def limit_words(text: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 # =====================================================
-# SUMMARY (N WORDS, CLEAN OUTPUT ONLY)
+# SUMMARY (N WORDS, DYNAMIC PROMPT)
 # =====================================================
-def summarize_all_pages(pages, max_words: int):
+def summarize_all_pages(pages, max_words: int, system_prompt: str):
     full_text = "\n\n".join(
         cleaned
         for p in pages
@@ -221,16 +237,6 @@ def summarize_all_pages(pages, max_words: int):
 
     if not full_text.strip():
         return ""
-
-    system_prompt = (
-        "You are a professional legal assistant.\n"
-        "Summarize the document in clear English.\n"
-        "Rules:\n"
-        "- This MUST be a concise summary, not a rewrite\n"
-        "- Do NOT invent facts or clauses\n"
-        "- Include only key information\n"
-        "- Ignore layout, tables, and formatting\n\n"
-    )
 
     prompt = (
         "<|system|>\n" + system_prompt +
@@ -270,10 +276,10 @@ def handler(event):
     log("Handler started")
 
     input_data = event["input"]
-    pages = input_data["pages"]
 
-    # Read desired word count (default = 100)
+    pages = input_data["pages"]
     max_words = int(input_data.get("n_words", 100))
+    system_prompt = input_data.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
 
     load_translate_model()
     load_summary_model()
@@ -285,7 +291,7 @@ def handler(event):
 
     # 2️⃣ Summarize
     log(f"Creating summary ({max_words} words)")
-    summary = summarize_all_pages(pages, max_words)
+    summary = summarize_all_pages(pages, max_words, system_prompt)
 
     log("Handler finished")
 
