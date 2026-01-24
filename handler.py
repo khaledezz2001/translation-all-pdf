@@ -32,16 +32,19 @@ translate_model = None
 # =====================================================
 DEFAULT_SYSTEM_PROMPT = (
     "You are a professional legal assistant.\n"
-    "Summarize the ENTIRE document in clear English.\n"
-    "IMPORTANT RULES:\n"
-    "- The document may span multiple pages and sections\n"
-    "- You MUST consider ALL sections, not only the beginning\n"
-    "- Compress information evenly across the whole document\n"
-    "- Mention the parties, subject matter, price, term, payments, penalties, and dispute resolution if present\n"
-    "- This MUST be a concise summary, not a rewrite\n"
-    "- Do NOT invent facts or clauses\n"
-    "- Ignore layout, tables, and formatting\n\n"
+    "Produce a single-paragraph summary of the ENTIRE document in clear English.\n"
+    "STRICT RULES:\n"
+    "- Output MUST be one paragraph only\n"
+    "- Do NOT use headings, titles, bullet points, or lists\n"
+    "- Do NOT classify the document type unless explicitly stated in the text\n"
+    "- Do NOT invent or infer information\n"
+    "- Mention only facts that are explicitly present in the document\n"
+    "- Cover all major sections evenly if the document is long\n"
+    "- Focus on parties, purpose, key obligations, payments, terms, penalties, and dispute resolution if present\n"
+    "- Ignore layout, tables, formatting, and section numbering\n"
+    "- Write in neutral legal English\n\n"
 )
+
 
 # =====================================================
 # Load SUMMARY model (Qwen 2.5 7B – FP16)
@@ -304,3 +307,4 @@ def handler(event):
 # Start RunPod serverless
 # =====================================================
 runpod.serverless.start({"handler": handler})
+
